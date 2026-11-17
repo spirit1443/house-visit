@@ -58,6 +58,7 @@
   <h1>주택 방문</h1>
   <label>엑셀 불러오기<input type="file" id="file" accept=".xlsx" hidden></label>
   <button id="exportBtn">내보내기</button>
+  <button id="addBtn" aria-label="집 추가">＋</button>
 </header>
 
 <main>
@@ -180,7 +181,7 @@ async function importFile(f) {
       if (!ex.ab && ab) ex.ab = ab;
       same++; return;
     }
-    const r = { id, v, st, at, ab, memo, p1: false, p2: false };
+    const r = { id, v, st, at, ab, memo, p1: false, p2: false, manual: id.startsWith('a:') };
     S.rows.push(r); byId.set(id, r); added++;
   });
 
@@ -305,7 +306,17 @@ $('#list').onclick = e => {
 // ---------- 상세 ----------
 let current = null, urls = [];
 function openDetail(id) { current = id; renderDetail(); $('#detail').style.display = 'block'; $('#detail').scrollTop = 0; history.pushState({ d: 1 }, ''); }
-function closeDetail() { current = null; $('#detail').style.display = 'none'; urls.forEach(URL.revokeObjectURL); urls = []; renderRoads(); renderList(); }
+function closeDetail() { current = null; $('#detail').style.display = 'none'; urls.forEach(URL.revokeObjectURL); urls = []; sortRows(); renderRoads(); renderList(); }
+
+// 명단에 없는 집 직접 추가 (고른 골목이 있으면 주소에 미리 채움)
+$('#addBtn').onclick = () => {
+  if (!S.cols.length) return alert('먼저 엑셀 명단을 불러와 주세요.');
+  const v = S.cols.map(() => ''), road = $('#road').value;
+  if (road) { v[IX.addr] = road + ' '; v[IX.road] = road; }
+  const r = { id: 'a:' + Date.now().toString(36), v, st: '', at: '', ab: 0, memo: '', p1: false, p2: false, manual: true };
+  touch(r); S.rows.unshift(r); byId.set(r.id, r); save();
+  openDetail(r.id); setTimeout(() => $('#mName')?.focus(), 50);
+};
 window.onpopstate = () => { if (current) closeDetail(); };
 
 // 사진을 줄이고 오른쪽 아래에 "찍은 날짜 · 건물 주소" 도장 (이름·번호는 안 넣음)
@@ -341,14 +352,22 @@ async function renderDetail() {
       ${u ? `<div class="slotBtns"><a class="btn sm" href="${u}" target="_blank">크게</a><button class="btn sm" data-pdel="${n}">삭제</button></div>` : ''}
     </div>`;
   };
+  // 지도: 건물 주소만 카카오맵으로 보냄 (이름·번호는 안 보냄)
+  const map = `https://map.kakao.com/link/search/${encodeURIComponent(addrHead(r))}`;
   $('#detail').innerHTML = `
     <header><button id="back">←</button><h1>${esc(nameOf(r))}</h1></header>
     <main>
+      ${r.manual ? `<div class="card">
+        <label class="muted">직접 추가한 집 — 이름</label><input id="mName" value="${esc(val(r, 'name'))}" placeholder="이름">
+        <label class="muted">연락처</label><input id="mPhone" type="tel" inputmode="tel" value="${ph ? fmtPhone(ph) : ''}" placeholder="010-0000-0000">
+        <label class="muted">주소</label><input id="mAddr" value="${esc(val(r, 'addr'))}" placeholder="화곡로68길 18, 301호">
+      </div>` : ''}
       <div class="card">
         <div style="font-weight:600">${esc(val(r, 'addr'))}</div>
+        <div style="margin-top:4px">${ph ? fmtPhone(ph) : '<span class="muted">번호 없음</span>'}</div>
         <div class="row" style="margin-top:8px">
-          <span style="flex:1">${ph ? fmtPhone(ph) : '<span class="muted">번호 없음</span>'}</span>
-          ${ph ? `<a class="btn primary" href="tel:${ph}">📞 전화</a>` : ''}
+          ${addrHead(r) ? `<a class="btn" style="flex:1" href="${map}" target="_blank" rel="noopener">🗺 지도</a>` : ''}
+          ${ph ? `<a class="btn primary" style="flex:1" href="tel:${ph}">📞 전화</a>` : ''}
         </div>
       </div>
       <div class="card">
@@ -361,7 +380,28 @@ async function renderDetail() {
         <label class="muted">메모</label>
         <textarea id="memo" placeholder="특이사항">${esc(r.memo)}</textarea>
       </div>
+      ${r.manual ? '<button class="btn" id="mDelete" style="width:100%;color:#c0392b">이 집 삭제</button>' : ''}
     </main>`;
+  if (r.manual) {
+    const setV = (k, v) => { r.v[IX[k]] = v; touch(r); save(); };
+    $('#mName').onchange = e => { setV('name', e.target.value.trim()); renderDetail(); };
+    $('#mPhone').onchange = e => {
+      const raw = e.target.value.trim(), p = normPhone(raw);
+      if (raw && !p) return alert('전화번호를 다시 확인해주세요.');
+      setV('phone', p); renderDetail();
+    };
+    $('#mAddr').onchange = e => {
+      const a = e.target.value.trim();
+      r.v[IX.addr] = a;
+      if (IX.road !== IX.addr) r.v[IX.road] = a.split(',')[0].replace(/\s/g, ''); // 골목·건물 묶음용
+      touch(r); save(); renderDetail();
+    };
+    $('#mDelete').onclick = async () => {
+      if (!confirm(`${nameOf(r)} 집과 사진을 삭제할까요?`)) return;
+      await idb('photos', 'readwrite', s => { s.delete(photoKey(r.id, 1)); s.delete(photoKey(r.id, 2)); });
+      S.rows = S.rows.filter(x => x !== r); byId.delete(r.id); await save(); history.back();
+    };
+  }
   $('#back').onclick = () => history.back();
   // 부재는 누를 때마다 횟수가 쌓이고, 나머지는 한 번 더 누르면 해제
   $('#detail').querySelectorAll('[data-st]').forEach(b => b.onclick = () => {
