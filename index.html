@@ -72,6 +72,7 @@
       <option value="photo">사진 있음</option>
     </select>
   </div>
+  <div class="row" id="phoneChips" style="margin-bottom:8px"></div>
   <div id="list"></div>
 </main>
 
@@ -262,11 +263,18 @@ function renderRoads() {
     [...g].sort((a, b) => coll.compare(a[0], b[0])).map(([k, [n, d]]) => `<option value="${esc(k)}">${esc(k)} (${d}/${n})</option>`).join('');
   sel.value = cur;
 }
-function filtered() {
+// 번호 있음 / 없음 체크 버튼 ('' = 전체)
+let phoneF = '';
+$('#phoneChips').onclick = e => {
+  const b = e.target.closest('[data-ph]'); if (!b) return;
+  phoneF = phoneF === b.dataset.ph ? '' : b.dataset.ph; resetList();
+};
+function filtered(ignorePhone) {
   const road = $('#road').value, f = $('#filter').value;
   const q = $('#search').value.trim().toLowerCase(), qd = q.replace(/\D/g, '');
   return S.rows.filter(r => {
     if (road && roadOf(r) !== road) return false;
+    if (!ignorePhone && phoneF && (phoneF === 'has') !== !!phoneOf(r)) return false;
     if (f === 'todo' && r.st) return false;
     if (f === 'photo' && !r.p1 && !r.p2) return false;
     if (STATUSES.includes(f) && r.st !== f) return false;
@@ -277,7 +285,10 @@ function filtered() {
 const stBadge = r => (r.st ? `<span class="badge ${/완료/.test(r.st) ? 'done' : 'warn'}">${esc(r.st)}</span>` : '') +
   (r.ab && r.st !== '부재' ? `<span class="badge warn">부재 ${r.ab}</span>` : r.ab > 1 ? `<span class="badge warn">${r.ab}회</span>` : '');
 function renderList() {
-  if (!S.rows.length) { $('#list').innerHTML = `<div class="empty">오른쪽 위 <b>엑셀 불러오기</b>로<br>주택 명단을 넣어주세요.</div>`; return; }
+  if (!S.rows.length) { $('#phoneChips').innerHTML = ''; $('#list').innerHTML = `<div class="empty">오른쪽 위 <b>엑셀 불러오기</b>로<br>주택 명단을 넣어주세요.</div>`; return; }
+  const all = filtered(true), nHas = all.filter(phoneOf).length;
+  $('#phoneChips').innerHTML = [['has', `📞 번호 있음 ${nHas.toLocaleString()}`], ['none', `번호 없음 ${(all.length - nHas).toLocaleString()}`]]
+    .map(([k, t]) => `<button class="chip ${phoneF === k ? 'on' : ''}" data-ph="${k}">${phoneF === k ? '✔ ' : ''}${t}</button>`).join('');
   const list = filtered(), done = list.filter(r => r.st).length, un = S.rows.filter(unsaved).length;
   const perB = new Map(); for (const r of list) perB.set(bldgOf(r), (perB.get(bldgOf(r)) || 0) + 1);
   let prev = null;
@@ -364,7 +375,10 @@ async function renderDetail() {
       </div>` : ''}
       <div class="card">
         <div style="font-weight:600">${esc(val(r, 'addr'))}</div>
-        <div style="margin-top:4px">${ph ? fmtPhone(ph) : '<span class="muted">번호 없음</span>'}</div>
+        ${r.manual ? '' : !ph || r.pa
+          ? `<label class="muted" style="display:block;margin-top:8px">📱 전화번호 ${ph ? '(앱에서 추가함)' : '없음 — 알게 되면 입력하세요'}</label>
+             <input id="addPhone" type="tel" inputmode="tel" value="${ph ? fmtPhone(ph) : ''}" placeholder="010-0000-0000">`
+          : `<div style="margin-top:4px">${fmtPhone(ph)}</div>`}
         <div class="row" style="margin-top:8px">
           ${addrHead(r) ? `<a class="btn" style="flex:1" href="${map}" target="_blank" rel="noopener">🗺 지도</a>` : ''}
           ${ph ? `<a class="btn primary" style="flex:1" href="tel:${ph}">📞 전화</a>` : ''}
@@ -382,6 +396,12 @@ async function renderDetail() {
       </div>
       ${r.manual ? '<button class="btn" id="mDelete" style="width:100%;color:#c0392b">이 집 삭제</button>' : ''}
     </main>`;
+  // 번호 없는 집: 번호를 넣으면 원래 연락처 열에 저장 (내보내기 엑셀에도 들어감)
+  if ($('#addPhone')) $('#addPhone').onchange = e => {
+    const raw = e.target.value.trim(), p = normPhone(raw);
+    if (raw && !p) return alert('전화번호를 다시 확인해주세요.');
+    r.v[IX.phone] = p; r.pa = !!p; touch(r); save(); renderDetail();
+  };
   if (r.manual) {
     const setV = (k, v) => { r.v[IX[k]] = v; touch(r); save(); };
     $('#mName').onchange = e => { setV('name', e.target.value.trim()); renderDetail(); };
