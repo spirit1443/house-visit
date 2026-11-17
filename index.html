@@ -86,7 +86,7 @@
     <select id="road"></select>
     <select id="filter">
       <option value="all">전체</option><option value="todo">미방문</option>
-      <option>방문완료</option><option>설치완료</option><option>부재</option><option>거절</option>
+      <option>설치예정</option><option>설치완료</option><option>부재</option><option>거절</option>
       <option value="photo">사진 있음</option>
     </select>
   </div>
@@ -100,7 +100,8 @@
 <script>
 // 화면에는 이름·연락처·주소만 보이고, 나머지 열(수급·장애유형 등)은 숨겨서 저장했다가 내보낼 때만 엑셀에 넣는다.
 // 모든 데이터와 사진은 이 폰 안(IndexedDB)에만 저장되고 서버로 보내지 않는다.
-const STATUSES = ['방문완료', '설치완료', '부재', '거절'];
+const STATUSES = ['설치예정', '설치완료', '부재', '거절'];
+const normSt = s => s === '방문완료' ? '설치예정' : s; // 예전 이름으로 저장된 기록 바꿈
 const EXTRA = ['방문상태', '방문일시', '부재횟수', '최근문자', '메모', '사진1', '사진2', '고유키'];
 const DEFAULT_TEMPLATES = [
   { title: '점검 일정 안내', body: '안녕하세요 {이름}님, 주택용 소방시설 점검 일정 안내차 연락드립니다.\n편하신 방문 가능 날짜와 시간을 알려주시면 맞춰서 방문드리겠습니다.\n감사합니다.' },
@@ -199,7 +200,7 @@ async function importFile(f) {
       seen.set(base, n);
       id = n > 1 ? base + '#' + n : base;
     }
-    const st = cell(row, ext('방문상태')), at = cell(row, ext('방문일시')), memo = cell(row, ext('메모')), ab = +cell(row, ext('부재횟수')) || 0, smsAt = cell(row, ext('최근문자'));
+    const st = normSt(cell(row, ext('방문상태'))), at = cell(row, ext('방문일시')), memo = cell(row, ext('메모')), ab = +cell(row, ext('부재횟수')) || 0, smsAt = cell(row, ext('최근문자'));
     const ex = byId.get(id);
     if (ex) { // 앱에 이미 있으면 앱 기록이 우선, 비어 있는 것만 채움
       if (!ex.st && st) { ex.st = st; ex.at = at; }
@@ -358,7 +359,7 @@ function filtered(ignorePhone) {
     return (qd.length >= 3 && phoneOf(r).includes(qd)) || ['name', 'addr', 'road'].some(k => String(val(r, k)).toLowerCase().includes(q));
   });
 }
-const stBadge = r => (r.st ? `<span class="badge ${/완료/.test(r.st) ? 'done' : 'warn'}">${esc(r.st)}</span>` : '') +
+const stBadge = r => (r.st ? `<span class="badge ${/완료/.test(r.st) ? 'done' : /부재|거절/.test(r.st) ? 'warn' : ''}">${esc(r.st)}</span>` : '') +
   (r.ab && r.st !== '부재' ? `<span class="badge warn">부재 ${r.ab}</span>` : r.ab > 1 ? `<span class="badge warn">${r.ab}회</span>` : '');
 function renderList() {
   if (!S.rows.length) { $('#phoneChips').innerHTML = ''; $('#list').innerHTML = `<div class="empty">오른쪽 위 <b>엑셀 불러오기</b>로<br>주택 명단을 넣어주세요.</div>`; return; }
@@ -544,6 +545,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
   const d = await idb('kv', 'readonly', s => s.get('data'));
   if (d) S = d;
   if (!S.templates) S.templates = DEFAULT_TEMPLATES.slice();
+  S.rows.forEach(r => r.st = normSt(r.st));
   renderTemplates();
   setIX(); sortRows(); byId = new Map(S.rows.map(r => [r.id, r]));
   navigator.storage?.persist?.(); // 공간 부족 시 브라우저가 임의로 지우지 않게 요청
