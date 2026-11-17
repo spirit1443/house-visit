@@ -32,10 +32,15 @@
   .house .info { flex:1; min-width:0; cursor:pointer; }
   .house .name { font-weight:600; }
   .house .meta { font-size:13px; color:var(--sub); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bldg { font-size:14px; font-weight:600; margin:14px 2px 6px; color:#555; }
+  .bldg small { font-weight:400; color:var(--sub); }
   .icon { width:44px; height:44px; border-radius:50%; font-size:20px; padding:0; flex:none; }
   .badge { display:inline-block; font-size:12px; padding:2px 6px; border-radius:10px; background:#eee; color:var(--sub); margin-left:4px; font-weight:400; }
   .badge.done { background:#e6f4ea; color:#1e7e34; }
   .badge.warn { background:#fdecea; color:#c0392b; }
+  .notice { background:#fff4e5; color:#8a4b00; border-radius:10px; padding:10px 12px; font-size:14px; margin-bottom:8px; display:flex; gap:8px; align-items:center; }
+  .notice span { flex:1; }
+  .notice button { background:none; border:0; font-size:16px; color:inherit; cursor:pointer; }
   #detail { position:fixed; inset:0; background:var(--bg); z-index:10; overflow-y:auto; display:none; }
   .photos { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   .slot { border:2px dashed var(--line); border-radius:10px; aspect-ratio:4/3; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--sub); cursor:pointer; overflow:hidden; position:relative; background:#fafafa; }
@@ -56,6 +61,7 @@
 </header>
 
 <main>
+  <div class="notice" id="installHint" hidden><span>📌 브라우저 메뉴에서 <b>홈 화면에 추가</b>로 열면 기록이 더 안전하게 보관돼요.</span><button id="hintClose" aria-label="닫기">✕</button></div>
   <input id="search" type="search" placeholder="이름 · 번호 · 주소 검색">
   <div class="filters">
     <select id="road"></select>
@@ -74,7 +80,7 @@
 // 화면에는 이름·연락처·주소만 보이고, 나머지 열(수급·장애유형 등)은 숨겨서 저장했다가 내보낼 때만 엑셀에 넣는다.
 // 모든 데이터와 사진은 이 폰 안(IndexedDB)에만 저장되고 서버로 보내지 않는다.
 const STATUSES = ['방문완료', '설치완료', '부재', '거절'];
-const EXTRA = ['방문상태', '방문일시', '메모', '사진1', '사진2', '고유키'];
+const EXTRA = ['방문상태', '방문일시', '부재횟수', '메모', '사진1', '사진2', '고유키'];
 const LIST_STEP = 200;
 const PHOTO_MAX = 1280; // 사진 긴 변 픽셀 (한 장 약 150KB)
 
@@ -93,7 +99,7 @@ async function idb(store, mode, fn) {
     tx.onerror = () => rej(tx.error);
   });
 }
-// rows: { id, v:[원본 열 값...], st:방문상태, at:방문일시(ISO), memo, p1, p2:사진 유무 }
+// rows: { id, v:[원본 열 값...], st:방문상태, at:방문일시, ab:부재횟수, memo, p1, p2:사진 유무, mt:마지막 수정, ex:마지막 내보내기 }
 let S = { cols: [], rows: [] };
 let byId = new Map(), IX = {};
 async function save() {
@@ -102,6 +108,8 @@ async function save() {
 }
 const photoKey = (id, n) => id + '|' + n;
 const getPhoto = (id, n) => idb('photos', 'readonly', s => s.get(photoKey(id, n)));
+const touch = r => { r.mt = new Date().toISOString(); };
+const unsaved = r => r.mt && (!r.ex || r.mt > r.ex);
 
 // ---------- 유틸 ----------
 const $ = s => document.querySelector(s);
@@ -125,13 +133,15 @@ function setIX() {
   if (IX.road < 0) IX.road = IX.addr;
 }
 const val = (r, k) => IX[k] >= 0 ? (r.v[IX[k]] ?? '') : '';
-// "화곡로68길136-27" → "화곡로68길" (앞에 붙은 "서울특별시", "강서구"는 뗌)
-const roadOf = r => {
-  const a = String(val(r, 'road')).replace(/\s/g, '').replace(/^(서울특별시|서울시|서울)?[가-힣]{1,3}구(?=[가-힣])/, '');
-  return (a.match(/^(.*(?:로|길))\d/) || [, a])[1];
-};
+// 건물: "강서구 화곡로68길136-27" → "화곡로68길136-27" (앞에 붙은 "서울특별시", "강서구"는 뗌)
+const bldgOf = r => String(val(r, 'road')).replace(/\s/g, '').replace(/^(서울특별시|서울시|서울)?[가-힣]{1,3}구(?=[가-힣])/, '');
+// 골목: "화곡로68길136-27" → "화곡로68길"
+const roadOf = r => { const a = bldgOf(r); return (a.match(/^(.*(?:로|길))\d/) || [, a])[1]; };
+const addrHead = r => String(val(r, 'addr')).split(',')[0].trim();               // "화곡로68길 136-27"
+const addrTail = r => String(val(r, 'addr')).split(',').slice(1).join(',').trim(); // "202호 (화곡동)"
 const nameOf = r => val(r, 'name') || '(이름 없음)';
 const phoneOf = r => normPhone(val(r, 'phone'));
+const sortRows = () => S.rows.sort((a, b) => coll.compare(bldgOf(a), bldgOf(b)) || coll.compare(val(a, 'addr'), val(b, 'addr')));
 
 // ---------- 엑셀 불러오기 ----------
 async function importFile(f) {
@@ -162,19 +172,33 @@ async function importFile(f) {
       seen.set(base, n);
       id = n > 1 ? base + '#' + n : base;
     }
-    const st = cell(row, ext('방문상태')), memo = cell(row, ext('메모'));
+    const st = cell(row, ext('방문상태')), at = cell(row, ext('방문일시')), memo = cell(row, ext('메모')), ab = +cell(row, ext('부재횟수')) || 0;
     const ex = byId.get(id);
     if (ex) { // 앱에 이미 있으면 앱 기록이 우선, 비어 있는 것만 채움
-      if (!ex.st && st) { ex.st = st; ex.at = cell(row, ext('방문일시')); }
+      if (!ex.st && st) { ex.st = st; ex.at = at; }
       if (!ex.memo && memo) ex.memo = memo;
+      if (!ex.ab && ab) ex.ab = ab;
       same++; return;
     }
-    const r = { id, v, st, at: cell(row, ext('방문일시')), memo, p1: false, p2: false };
+    const r = { id, v, st, at, ab, memo, p1: false, p2: false };
     S.rows.push(r); byId.set(id, r); added++;
   });
-  S.rows.sort((a, b) => coll.compare(val(a, 'road'), val(b, 'road')) || coll.compare(val(a, 'addr'), val(b, 'addr')));
-  await save(); renderRoads(); resetList();
-  alert(`불러오기 완료\n새로 ${added}집 · 이미 있던 ${same}집\n전체 ${S.rows.length.toLocaleString()}집`);
+
+  // 이 앱에서 내보낸 엑셀이면 사진도 되살림 (앱에 이미 있는 사진은 그대로 둠)
+  let restored = 0;
+  const P1 = ext('사진1'), KEY = ext('고유키');
+  if (P1 >= 0 && KEY >= 0) for (const im of ws.getImages()) {
+    const n = im.range.tl.nativeCol - P1 + 1; if (n !== 1 && n !== 2) continue;
+    const r = byId.get(cell(ws.getRow(im.range.tl.nativeRow + 1), KEY));
+    if (!r || r['p' + n]) continue;
+    const m = wb.getImage(+im.imageId);
+    const blob = new Blob([m.buffer], { type: 'image/' + (m.extension || 'jpeg') });
+    const bmp = await createImageBitmap(blob);
+    await idb('photos', 'readwrite', s => s.put({ blob, w: bmp.width, h: bmp.height }, photoKey(r.id, n)));
+    r['p' + n] = true; restored++;
+  }
+  sortRows(); await save(); renderRoads(); resetList();
+  alert(`불러오기 완료\n새로 ${added}집 · 이미 있던 ${same}집` + (restored ? `\n사진 ${restored}장 복원` : '') + `\n전체 ${S.rows.length.toLocaleString()}집`);
 }
 $('#file').onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
@@ -193,12 +217,13 @@ $('#exportBtn').onclick = async () => {
   const btn = $('#exportBtn'); btn.disabled = true;
   try {
     const wb = new ExcelJS.Workbook(), ws = wb.addWorksheet('방문');
-    const P = S.cols.length + 3; // 사진1 열 (0부터 셈)
+    const P = S.cols.length + EXTRA.indexOf('사진1'); // 사진1 열 (0부터 셈)
+    const M = S.cols.length + EXTRA.indexOf('메모');
     ws.addRow([...S.cols, ...EXTRA]).font = { bold: true };
-    ws.columns.forEach((c, i) => c.width = i === IX.addr ? 28 : i === P || i === P + 1 ? 22 : i === P - 1 ? 30 : 12);
+    ws.columns.forEach((c, i) => c.width = i === IX.addr ? 28 : i === P || i === P + 1 ? 22 : i === M ? 30 : 12);
     for (let i = 0; i < list.length; i++) {
       const r = list[i];
-      const row = ws.addRow([...r.v, r.st || '', fmtDate(r.at), r.memo || '', '', '', r.id]);
+      const row = ws.addRow([...r.v, r.st || '', fmtDate(r.at), r.ab || '', r.memo || '', '', '', r.id]);
       if (!r.p1 && !r.p2) continue;
       row.height = 95; // 약 127px
       btn.textContent = `사진 ${i + 1}/${list.length}`;
@@ -215,6 +240,9 @@ $('#exportBtn').onclick = async () => {
     a.href = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     a.download = `주택방문_${fmtDate(new Date().toISOString()).slice(0, 10)}${$('#road').value ? '_' + $('#road').value : ''}.xlsx`;
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    const now = new Date().toISOString();
+    list.forEach(r => r.ex = now);
+    await save(); renderList();
   } catch (e) { alert('내보내기 실패: ' + e.message); }
   btn.disabled = false; btn.textContent = '내보내기';
 };
@@ -245,17 +273,24 @@ function filtered() {
     return (qd.length >= 3 && phoneOf(r).includes(qd)) || ['name', 'addr', 'road'].some(k => String(val(r, k)).toLowerCase().includes(q));
   });
 }
-const stBadge = st => st ? `<span class="badge ${/완료/.test(st) ? 'done' : 'warn'}">${esc(st)}</span>` : '';
+const stBadge = r => (r.st ? `<span class="badge ${/완료/.test(r.st) ? 'done' : 'warn'}">${esc(r.st)}</span>` : '') +
+  (r.ab && r.st !== '부재' ? `<span class="badge warn">부재 ${r.ab}</span>` : r.ab > 1 ? `<span class="badge warn">${r.ab}회</span>` : '');
 function renderList() {
   if (!S.rows.length) { $('#list').innerHTML = `<div class="empty">오른쪽 위 <b>엑셀 불러오기</b>로<br>주택 명단을 넣어주세요.</div>`; return; }
-  const list = filtered(), done = list.filter(r => r.st).length;
-  $('#list').innerHTML = `<p class="muted">${list.length.toLocaleString()}집 · 방문기록 ${done.toLocaleString()}집${list.length > shown ? ` · ${shown}집까지 표시 (골목을 고르거나 검색해 좁혀보세요)` : ''}</p>` +
+  const list = filtered(), done = list.filter(r => r.st).length, un = S.rows.filter(unsaved).length;
+  const perB = new Map(); for (const r of list) perB.set(bldgOf(r), (perB.get(bldgOf(r)) || 0) + 1);
+  let prev = null;
+  $('#list').innerHTML =
+    (un ? `<div class="notice"><span>⚠ 아직 내보내지 않은 기록 <b>${un}집</b> — 하루 일 끝나면 <b>내보내기</b>로 엑셀을 받아 두세요.</span></div>` : '') +
+    `<p class="muted">${list.length.toLocaleString()}집 · 방문기록 ${done.toLocaleString()}집${list.length > shown ? ` · ${shown}집까지 표시 (골목을 고르거나 검색해 좁혀보세요)` : ''}</p>` +
     list.slice(0, shown).map(r => {
-      const ph = phoneOf(r), pc = r.p1 + r.p2;
-      return `<div class="card house">
+      const ph = phoneOf(r), pc = r.p1 + r.p2, b = bldgOf(r);
+      const h = b !== prev ? `<div class="bldg">🏠 ${esc(addrHead(r))} <small>${perB.get(b)}집</small></div>` : '';
+      prev = b;
+      return h + `<div class="card house">
         <div class="info" data-open="${esc(r.id)}">
-          <div class="name">${esc(nameOf(r))}${stBadge(r.st)}${pc ? `<span class="badge">📷 ${pc}</span>` : ''}</div>
-          <div class="meta">${esc(val(r, 'addr'))}</div>
+          <div class="name">${esc(nameOf(r))}${stBadge(r)}${pc ? `<span class="badge">📷 ${pc}</span>` : ''}</div>
+          <div class="meta">${esc(addrTail(r) || val(r, 'addr'))}</div>
           <div class="meta">${ph ? fmtPhone(ph) : '번호 없음'}${r.memo ? ' · ' + esc(r.memo) : ''}</div>
         </div>
         ${ph ? `<a class="btn icon" href="tel:${ph}" aria-label="전화">📞</a>` : ''}
@@ -273,12 +308,22 @@ function openDetail(id) { current = id; renderDetail(); $('#detail').style.displ
 function closeDetail() { current = null; $('#detail').style.display = 'none'; urls.forEach(URL.revokeObjectURL); urls = []; renderRoads(); renderList(); }
 window.onpopstate = () => { if (current) closeDetail(); };
 
-async function shrink(file) {
+// 사진을 줄이고 오른쪽 아래에 "찍은 날짜 · 건물 주소" 도장 (이름·번호는 안 넣음)
+async function shrink(file, stamp) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
   const k = Math.min(1, PHOTO_MAX / Math.max(bmp.width, bmp.height));
   const cv = document.createElement('canvas');
   cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
-  cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+  const g = cv.getContext('2d');
+  g.drawImage(bmp, 0, 0, cv.width, cv.height);
+  let fs = Math.round(Math.max(cv.width, cv.height) / 32);
+  g.font = `bold ${fs}px sans-serif`;
+  const tw = g.measureText(stamp).width, room = cv.width * 0.94;
+  if (tw > room) { fs = Math.floor(fs * room / tw); g.font = `bold ${fs}px sans-serif`; }
+  g.textAlign = 'right'; g.textBaseline = 'bottom';
+  g.lineWidth = Math.max(2, fs / 6); g.strokeStyle = 'rgba(0,0,0,.8)'; g.fillStyle = '#ffeb3b';
+  const x = cv.width - fs * 0.5, y = cv.height - fs * 0.5;
+  g.strokeText(stamp, x, y); g.fillText(stamp, x, y);
   const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.75));
   return { blob, w: cv.width, h: cv.height };
 }
@@ -307,8 +352,9 @@ async function renderDetail() {
         </div>
       </div>
       <div class="card">
-        <div class="row">${STATUSES.map(s => `<button class="chip ${r.st === s ? 'on' : ''}" data-st="${s}">${s}</button>`).join('')}</div>
-        ${r.at ? `<p class="muted" style="margin:6px 0 0">${fmtDate(r.at)} 기록</p>` : ''}
+        <div class="row">${STATUSES.map(s => `<button class="chip ${r.st === s ? 'on' : ''}" data-st="${s}">${s}${s === '부재' && r.ab ? ' ' + r.ab : ''}</button>`).join('')}</div>
+        ${r.at || r.ab ? `<div class="row muted" style="margin-top:6px"><span style="flex:1">${r.at ? fmtDate(r.at) + ' 기록' : ''}${r.ab ? ` · 부재 ${r.ab}회` : ''}</span>
+          ${r.ab ? '<button class="btn sm" id="abMinus">부재 −1</button>' : ''}</div>` : ''}
       </div>
       <div class="card"><div class="photos">${slot(1)}${slot(2)}</div></div>
       <div class="card">
@@ -317,32 +363,48 @@ async function renderDetail() {
       </div>
     </main>`;
   $('#back').onclick = () => history.back();
+  // 부재는 누를 때마다 횟수가 쌓이고, 나머지는 한 번 더 누르면 해제
   $('#detail').querySelectorAll('[data-st]').forEach(b => b.onclick = () => {
     const s = b.dataset.st;
-    r.st = r.st === s ? '' : s; r.at = r.st ? new Date().toISOString() : '';
-    save(); renderDetail();
+    if (s === '부재') { r.ab = (r.ab || 0) + 1; r.st = s; }
+    else r.st = r.st === s ? '' : s;
+    r.at = r.st ? new Date().toISOString() : '';
+    touch(r); save(); renderDetail();
   });
-  $('#memo').onchange = e => { r.memo = e.target.value.trim(); save(); };
+  if ($('#abMinus')) $('#abMinus').onclick = () => {
+    r.ab--; if (!r.ab && r.st === '부재') { r.st = ''; r.at = ''; }
+    touch(r); save(); renderDetail();
+  };
+  $('#memo').onchange = e => { r.memo = e.target.value.trim(); touch(r); save(); };
   $('#detail').querySelectorAll('[data-photo]').forEach(inp => inp.onchange = async () => {
     const f = inp.files[0], n = +inp.dataset.photo; if (!f) return;
     try {
-      const p = await shrink(f);
+      const p = await shrink(f, `${fmtDate(new Date().toISOString())} · ${addrHead(r)}`);
       await idb('photos', 'readwrite', s => s.put(p, photoKey(r.id, n)));
-      r['p' + n] = true; await save(); renderDetail();
+      r['p' + n] = true; touch(r); await save(); renderDetail();
     } catch (e) { alert('사진 저장 실패: ' + e.message); }
   });
   $('#detail').querySelectorAll('[data-pdel]').forEach(b => b.onclick = async () => {
     const n = +b.dataset.pdel;
     if (!confirm(`사진${n}을 삭제할까요?`)) return;
     await idb('photos', 'readwrite', s => s.delete(photoKey(r.id, n)));
-    r['p' + n] = false; await save(); renderDetail();
+    r['p' + n] = false; touch(r); await save(); renderDetail();
   });
 }
+
+// ---------- 홈 화면 추가 안내 (아이폰은 홈 화면 앱이 아니면 오래 안 쓴 사이트 데이터를 지울 수 있음) ----------
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+let hintOff = false; try { hintOff = localStorage.getItem('hintOff') === '1'; } catch (e) {}
+$('#installHint').hidden = standalone || hintOff;
+$('#hintClose').onclick = () => { $('#installHint').hidden = true; try { localStorage.setItem('hintOff', '1'); } catch (e) {} };
+
+// 전파 없는 곳에서도 열리게 앱 파일을 폰에 보관
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 (async () => {
   const d = await idb('kv', 'readonly', s => s.get('data'));
   if (d) S = d;
-  setIX(); byId = new Map(S.rows.map(r => [r.id, r]));
+  setIX(); sortRows(); byId = new Map(S.rows.map(r => [r.id, r]));
   navigator.storage?.persist?.(); // 공간 부족 시 브라우저가 임의로 지우지 않게 요청
   renderRoads(); renderList();
 })().catch(e => alert('데이터를 불러오지 못했어요: ' + e));
