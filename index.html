@@ -90,6 +90,7 @@
       <option value="photo">사진 있음</option>
     </select>
   </div>
+  <div class="row" style="margin-bottom:8px"><button class="chip" id="planBtn"></button></div>
   <div class="row" id="phoneChips" style="margin-bottom:8px"></div>
   <div id="list"></div>
 </main>
@@ -342,6 +343,7 @@ function renderRoads() {
 }
 // 번호 있음 / 없음 체크 버튼 ('' = 전체)
 let phoneF = '';
+$('#planBtn').onclick = () => { $('#filter').value = $('#filter').value === '설치예정' ? 'all' : '설치예정'; resetList(); };
 $('#phoneChips').onclick = e => {
   const b = e.target.closest('[data-ph]'); if (!b) return;
   phoneF = phoneF === b.dataset.ph ? '' : b.dataset.ph; resetList();
@@ -362,7 +364,13 @@ function filtered(ignorePhone) {
 const stBadge = r => (r.st ? `<span class="badge ${/완료/.test(r.st) ? 'done' : /부재|거절/.test(r.st) ? 'warn' : ''}">${esc(r.st)}</span>` : '') +
   (r.ab && r.st !== '부재' ? `<span class="badge warn">부재 ${r.ab}</span>` : r.ab > 1 ? `<span class="badge warn">${r.ab}회</span>` : '');
 function renderList() {
+  $('#planBtn').hidden = !S.rows.length;
   if (!S.rows.length) { $('#phoneChips').innerHTML = ''; $('#list').innerHTML = `<div class="empty">오른쪽 위 <b>엑셀 불러오기</b>로<br>주택 명단을 넣어주세요.</div>`; return; }
+  // 설치예정만 보기 버튼 (위 상태 선택과 같은 걸 바꿈, 숫자는 고른 골목 기준)
+  const road = $('#road').value, onPlan = $('#filter').value === '설치예정';
+  const nPlan = S.rows.filter(r => r.st === '설치예정' && (!road || roadOf(r) === road)).length;
+  $('#planBtn').className = 'chip' + (onPlan ? ' on' : '');
+  $('#planBtn').textContent = `${onPlan ? '✔ ' : ''}🔧 설치예정만 보기 ${nPlan.toLocaleString()}집`;
   const all = filtered(true), nHas = all.filter(phoneOf).length;
   $('#phoneChips').innerHTML = [['has', `📞 번호 있음 ${nHas.toLocaleString()}`], ['none', `번호 없음 ${(all.length - nHas).toLocaleString()}`]]
     .map(([k, t]) => `<button class="chip ${phoneF === k ? 'on' : ''}" data-ph="${k}">${phoneF === k ? '✔ ' : ''}${t}</button>`).join('');
