@@ -1,0 +1,9 @@
+{
+  "name": "주택 방문",
+  "short_name": "주택방문",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f4f6",
+  "theme_color": "#d35400",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
