@@ -48,6 +48,12 @@
   .slot .tag { position:absolute; top:4px; left:4px; background:rgba(0,0,0,.55); color:#fff; font-size:12px; padding:2px 6px; border-radius:8px; }
   .slotBtns { display:flex; gap:4px; margin-top:4px; }
   .slotBtns .btn { flex:1; }
+  details summary { font-weight:600; cursor:pointer; padding:4px 0; }
+  .tpl { border-top:1px solid var(--line); padding:8px 0; }
+  .tpl b { display:block; font-size:14px; }
+  .tpl p { margin:4px 0; font-size:14px; color:var(--sub); white-space:pre-wrap; }
+  #picker { position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:20; display:none; }
+  #picker .sheet { position:absolute; bottom:0; left:0; right:0; max-height:80%; overflow-y:auto; background:#fff; border-radius:16px 16px 0 0; padding:16px; }
   .empty { text-align:center; color:var(--sub); padding:40px 0; }
   .muted { color:var(--sub); font-size:13px; }
 </style>
@@ -63,6 +69,18 @@
 
 <main>
   <div class="notice" id="installHint" hidden><span>📌 브라우저 메뉴에서 <b>홈 화면에 추가</b>로 열면 기록이 더 안전하게 보관돼요.</span><button id="hintClose" aria-label="닫기">✕</button></div>
+  <details class="card" id="tplBox">
+    <summary>💬 문자 문구 (<span id="tplCount">0</span>)</summary>
+    <div id="tplList"></div>
+    <div class="tpl">
+      <input id="tplTitle" placeholder="문구 제목">
+      <textarea id="tplBody" placeholder="내용 — {이름} 은 받는 분 이름, {주소} 는 주소로 바뀝니다." style="margin-top:6px"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button class="btn primary" id="tplSave">문구 저장</button>
+        <button class="btn" id="tplCancel" hidden>취소</button>
+      </div>
+    </div>
+  </details>
   <input id="search" type="search" placeholder="이름 · 번호 · 주소 검색">
   <div class="filters">
     <select id="road"></select>
@@ -77,12 +95,19 @@
 </main>
 
 <section id="detail"></section>
+<section id="picker"><div class="sheet" id="pickerSheet"></div></section>
 
 <script>
 // 화면에는 이름·연락처·주소만 보이고, 나머지 열(수급·장애유형 등)은 숨겨서 저장했다가 내보낼 때만 엑셀에 넣는다.
 // 모든 데이터와 사진은 이 폰 안(IndexedDB)에만 저장되고 서버로 보내지 않는다.
 const STATUSES = ['방문완료', '설치완료', '부재', '거절'];
-const EXTRA = ['방문상태', '방문일시', '부재횟수', '메모', '사진1', '사진2', '고유키'];
+const EXTRA = ['방문상태', '방문일시', '부재횟수', '최근문자', '메모', '사진1', '사진2', '고유키'];
+const DEFAULT_TEMPLATES = [
+  { title: '점검 일정 안내', body: '안녕하세요 {이름}님, 주택용 소방시설 점검 일정 안내차 연락드립니다.\n편하신 방문 가능 날짜와 시간을 알려주시면 맞춰서 방문드리겠습니다.\n감사합니다.' },
+  { title: '부재 시 문자', body: '안녕하세요 {이름}님, 주택용 소방시설 관련으로 방문(연락)드렸는데 뵙지 못해 문자 남깁니다.\n편하실 때 회신 부탁드립니다. 감사합니다.' },
+  { title: '방문 일정 확정', body: '{이름}님, 말씀하신 일정에 주택용 소방시설 점검 방문 예정입니다.\n변동 사항 있으시면 연락 부탁드립니다. 감사합니다.' },
+  { title: '설치 완료 감사', body: '{이름}님, 오늘 주택용 소방시설 설치에 협조해주셔서 감사합니다.\n궁금하신 점 있으시면 언제든 연락주세요.' },
+];
 const LIST_STEP = 200;
 const PHOTO_MAX = 1280; // 사진 긴 변 픽셀 (한 장 약 150KB)
 
@@ -102,7 +127,7 @@ async function idb(store, mode, fn) {
   });
 }
 // rows: { id, v:[원본 열 값...], st:방문상태, at:방문일시, ab:부재횟수, memo, p1, p2:사진 유무, mt:마지막 수정, ex:마지막 내보내기 }
-let S = { cols: [], rows: [] };
+let S = { cols: [], rows: [], templates: null };
 let byId = new Map(), IX = {};
 async function save() {
   try { await idb('kv', 'readwrite', s => s.put(S, 'data')); }
@@ -174,15 +199,16 @@ async function importFile(f) {
       seen.set(base, n);
       id = n > 1 ? base + '#' + n : base;
     }
-    const st = cell(row, ext('방문상태')), at = cell(row, ext('방문일시')), memo = cell(row, ext('메모')), ab = +cell(row, ext('부재횟수')) || 0;
+    const st = cell(row, ext('방문상태')), at = cell(row, ext('방문일시')), memo = cell(row, ext('메모')), ab = +cell(row, ext('부재횟수')) || 0, smsAt = cell(row, ext('최근문자'));
     const ex = byId.get(id);
     if (ex) { // 앱에 이미 있으면 앱 기록이 우선, 비어 있는 것만 채움
       if (!ex.st && st) { ex.st = st; ex.at = at; }
       if (!ex.memo && memo) ex.memo = memo;
       if (!ex.ab && ab) ex.ab = ab;
+      if (!ex.smsAt && smsAt) ex.smsAt = smsAt;
       same++; return;
     }
-    const r = { id, v, st, at, ab, memo, p1: false, p2: false, manual: id.startsWith('a:') };
+    const r = { id, v, st, at, ab, smsAt, memo, p1: false, p2: false, manual: id.startsWith('a:') };
     S.rows.push(r); byId.set(id, r); added++;
   });
 
@@ -225,7 +251,7 @@ $('#exportBtn').onclick = async () => {
     ws.columns.forEach((c, i) => c.width = i === IX.addr ? 28 : i === P || i === P + 1 ? 22 : i === M ? 30 : 12);
     for (let i = 0; i < list.length; i++) {
       const r = list[i];
-      const row = ws.addRow([...r.v, r.st || '', fmtDate(r.at), r.ab || '', r.memo || '', '', '', r.id]);
+      const row = ws.addRow([...r.v, r.st || '', fmtDate(r.at), r.ab || '', fmtDate(r.smsAt), r.memo || '', '', '', r.id]);
       if (!r.p1 && !r.p2) continue;
       row.height = 95; // 약 127px
       btn.textContent = `사진 ${i + 1}/${list.length}`;
@@ -248,6 +274,56 @@ $('#exportBtn').onclick = async () => {
   } catch (e) { alert('내보내기 실패: ' + e.message); }
   btn.disabled = false; btn.textContent = '내보내기';
 };
+
+// ---------- 문자 문구 ----------
+// {이름}·{주소}만 바꿔 넣음 (수급·장애 같은 숨긴 정보는 문자에 절대 안 들어가게)
+const fillTemplate = (body, r) => body.replace(/\{이름\}/g, val(r, 'name')).replace(/\{주소\}/g, val(r, 'addr'));
+let editingTpl = -1;
+function renderTemplates() {
+  $('#tplCount').textContent = S.templates.length;
+  $('#tplList').innerHTML = S.templates.map((t, i) => `
+    <div class="tpl"><b>${esc(t.title)}</b><p>${esc(t.body)}</p>
+      <button class="btn sm" data-edit="${i}">수정</button>
+      <button class="btn sm" data-del="${i}">삭제</button></div>`).join('');
+}
+$('#tplList').onclick = e => {
+  const ed = e.target.dataset.edit, del = e.target.dataset.del;
+  if (ed != null) {
+    editingTpl = +ed;
+    $('#tplTitle').value = S.templates[ed].title; $('#tplBody').value = S.templates[ed].body;
+    $('#tplCancel').hidden = false; $('#tplTitle').focus();
+  }
+  if (del != null && confirm(`"${S.templates[del].title}" 문구를 삭제할까요?`)) { S.templates.splice(del, 1); save(); renderTemplates(); }
+};
+function resetTplForm() { editingTpl = -1; $('#tplTitle').value = ''; $('#tplBody').value = ''; $('#tplCancel').hidden = true; }
+$('#tplSave').onclick = () => {
+  const title = $('#tplTitle').value.trim(), body = $('#tplBody').value.trim();
+  if (!body) return alert('내용을 입력해주세요.');
+  const t = { title: title || body.slice(0, 15), body };
+  if (editingTpl >= 0) S.templates[editingTpl] = t; else S.templates.push(t);
+  save(); resetTplForm(); renderTemplates();
+};
+$('#tplCancel').onclick = resetTplForm;
+
+// 문구를 고르면 폰 문자 앱이 내용이 채워진 채로 열림 (보내기는 문자 앱에서 직접)
+function openPicker(id) {
+  const r = byId.get(id), ph = r && phoneOf(r); if (!ph) return;
+  $('#pickerSheet').innerHTML = `
+    <div class="row" style="margin-bottom:8px"><b style="flex:1">${esc(nameOf(r))}님께 문자</b><button class="btn sm" id="pickClose">닫기</button></div>
+    ${S.templates.map((t, i) => `<div class="tpl" data-pick="${i}" style="cursor:pointer"><b>${esc(t.title)}</b><p>${esc(fillTemplate(t.body, r))}</p></div>`).join('')}
+    <div class="tpl" data-pick="-1" style="cursor:pointer"><b>빈 문자 (직접 작성)</b></div>`;
+  $('#picker').style.display = 'block';
+  $('#pickClose').onclick = closePicker;
+  $('#pickerSheet').querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
+    const i = +el.dataset.pick, body = i >= 0 ? fillTemplate(S.templates[i].body, r) : '';
+    r.smsAt = new Date().toISOString(); touch(r); save();
+    closePicker();
+    location.href = `sms:${ph}${body ? '?body=' + encodeURIComponent(body) : ''}`;
+    if (current) renderDetail(); else renderList();
+  });
+}
+function closePicker() { $('#picker').style.display = 'none'; }
+$('#picker').onclick = e => { if (e.target.id === 'picker') closePicker(); };
 
 // ---------- 목록 ----------
 let shown = LIST_STEP;
@@ -303,14 +379,15 @@ function renderList() {
         <div class="info" data-open="${esc(r.id)}">
           <div class="name">${esc(nameOf(r))}${stBadge(r)}${pc ? `<span class="badge">📷 ${pc}</span>` : ''}</div>
           <div class="meta">${esc(addrTail(r) || val(r, 'addr'))}</div>
-          <div class="meta">${ph ? fmtPhone(ph) : '번호 없음'}${r.memo ? ' · ' + esc(r.memo) : ''}</div>
+          <div class="meta">${ph ? fmtPhone(ph) : '번호 없음'}${r.smsAt ? ' · 💬 ' + fmtDate(r.smsAt).slice(5, 10) : ''}${r.memo ? ' · ' + esc(r.memo) : ''}</div>
         </div>
-        ${ph ? `<a class="btn icon" href="tel:${ph}" aria-label="전화">📞</a>` : ''}
+        ${ph ? `<a class="btn icon" href="tel:${ph}" aria-label="전화">📞</a><button class="btn icon" data-sms="${esc(r.id)}" aria-label="문자">💬</button>` : ''}
       </div>`;
     }).join('') + (list.length > shown ? `<button class="btn" id="more" style="width:100%">${LIST_STEP}집 더 보기</button>` : '');
 }
 $('#list').onclick = e => {
   if (e.target.id === 'more') { shown += LIST_STEP; return renderList(); }
+  const s = e.target.closest('[data-sms]'); if (s) return openPicker(s.dataset.sms);
   const t = e.target.closest('[data-open]'); if (t) openDetail(t.dataset.open);
 };
 
@@ -381,8 +458,9 @@ async function renderDetail() {
           : `<div style="margin-top:4px">${fmtPhone(ph)}</div>`}
         <div class="row" style="margin-top:8px">
           ${addrHead(r) ? `<a class="btn" style="flex:1" href="${map}" target="_blank" rel="noopener">🗺 지도</a>` : ''}
-          ${ph ? `<a class="btn primary" style="flex:1" href="tel:${ph}">📞 전화</a>` : ''}
+          ${ph ? `<a class="btn primary" style="flex:1" href="tel:${ph}">📞 전화</a><button class="btn primary" style="flex:1" id="dSms">💬 문자</button>` : ''}
         </div>
+        ${r.smsAt ? `<p class="muted" style="margin:6px 0 0">최근 문자 ${fmtDate(r.smsAt)}</p>` : ''}
       </div>
       <div class="card">
         <div class="row">${STATUSES.map(s => `<button class="chip ${r.st === s ? 'on' : ''}" data-st="${s}">${s}${s === '부재' && r.ab ? ' ' + r.ab : ''}</button>`).join('')}</div>
@@ -423,6 +501,7 @@ async function renderDetail() {
     };
   }
   $('#back').onclick = () => history.back();
+  if ($('#dSms')) $('#dSms').onclick = () => openPicker(r.id);
   // 부재는 누를 때마다 횟수가 쌓이고, 나머지는 한 번 더 누르면 해제
   $('#detail').querySelectorAll('[data-st]').forEach(b => b.onclick = () => {
     const s = b.dataset.st;
@@ -464,6 +543,8 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
 (async () => {
   const d = await idb('kv', 'readonly', s => s.get('data'));
   if (d) S = d;
+  if (!S.templates) S.templates = DEFAULT_TEMPLATES.slice();
+  renderTemplates();
   setIX(); sortRows(); byId = new Map(S.rows.map(r => [r.id, r]));
   navigator.storage?.persist?.(); // 공간 부족 시 브라우저가 임의로 지우지 않게 요청
   renderRoads(); renderList();
